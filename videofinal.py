@@ -557,53 +557,113 @@ def source_moment_pipeline(topic,research,root,mode,wanted=10):
     return sources,moments[:wanted]
 
 def short_shots(topic,research,root,res):
-    sources,moments=source_moment_pipeline(topic,research,root,'short',10)
-    if len(moments)<3:raise RuntimeError('Could not obtain three usable spoken source moments after subtitles and Whisper probes.')
-    script=build_script_short(topic,research,moments);shots=[];groups=[]
-    # Real speaker first, then narration, then speaker, then narration/source alternation.
-    order=script.get('order',[]) or list(range(3))
-    # Accept either 1-based LLM order or zero-based fallback order; drop invalid/duplicate picks.
+    sources,moments=source_moment_pipeline(topic,research,root,'short',12)
+    if not sources:
+        raise RuntimeError('No audiovisual source survived automatic acquisition.')
+    script=build_script_short(topic,research,moments)
+    shots=[];groups=[]
+    order=script.get('order',[]) or list(range(min(6,len(moments))))
     seen=set();queue=[]
     for i in order:
-        try:m=moments[int(i)-1] if int(i)>0 else moments[int(i)]
-        except Exception:continue
-        key=(m['source_url'],round(m['cut'],2));
-        if key not in seen:seen.add(key);queue.append(m)
+        try:
+            m=moments[int(i)-1] if int(i)>0 else moments[int(i)]
+        except Exception:
+            continue
+        key=(m.get('source_url'),round(float(m.get('cut',0)),2))
+        if key not in seen:
+            seen.add(key);queue.append(m)
     for m in moments:
-        key=(m['source_url'],round(m['cut'],2))
-        if key not in seen:seen.add(key);queue.append(m)
+        key=(m.get('source_url'),round(float(m.get('cut',0)),2))
+        if key not in seen:
+            seen.add(key);queue.append(m)
+
+    # If speech moments are sparse, add real-footage B-roll windows from the same
+    # verified sources. These carry source audio, but only speech windows get
+    # word-synced source captions.
+    if len(queue)<5:
+        for si,src in enumerate(sources[:4]):
+            dur=float(src.get('duration') or 60)
+            for pct in (0.08,0.28,0.48,0.68,0.84):
+                cut=min(max(0.0,dur*pct),max(0.0,dur-6.0))
+                key=(src.get('url'),round(cut,2))
+                if key in seen:
+                    continue
+                seen.add(key)
+                queue.append({
+                    'source_url':src['url'],'source_title':src.get('title',''),
+                    'uploader':src.get('uploader',''),'cut':cut,'dur':6.0,'quote':'',
+                })
+                if len(queue)>=8:
+                    break
+            if len(queue)>=8:
+                break
+
     downloaded=[]
-    for i,m in enumerate(queue[:10]):
-        key=hashlib.sha1((m['source_url']+f'|{m['cut']:.2f}|{m['dur']:.2f}').encode()).hexdigest()[:12];p=ASSET_CLIPS/f'{slug(topic)}_short_{i:02d}_{key}.mp4'
-        if not p.exists():download_segment(m['source_url'],m['cut'],m['dur'],p)
+    for i,m in enumerate(queue[:12]):
+        key=hashlib.sha1((m['source_url']+f'|{m.get("cut",0):.2f}|{m.get("dur",6):.2f}').encode()).hexdigest()[:12]
+        p=ASSET_CLIPS/f'{slug(topic)}_short_{i:02d}_{key}.mp4'
+        try:
+            if not p.exists():
+                download_segment(m['source_url'],float(m.get('cut',0)),float(m.get('dur',6)),p)
+        except Exception:
+            continue
         local_words=m.get('asr_words') or []
         if local_words:
-            # Probe-ASR timestamps are absolute source times; downloaded clip words must be local.
-            local_words=[{'text':w['text'],'start':max(0,float(w['start'])-float(m['cut'])),'end':max(0,float(w['end'])-float(m['cut']))} for w in local_words]
-        elif has_module('faster_whisper'):
+            local_words=[{
+                'text':w['text'],
+                'start':max(0,float(w['start'])-float(m.get('cut',0))),
+                'end':max(0,float(w['end'])-float(m.get('cut',0)))
+            } for w in local_words]
+        elif has_module('faster_whisper') and not m.get('quote'):
             local_words=whisper_words(p)
-        m['file']=str(p);m['local_words']=local_words;downloaded.append(m)
-    root_words=lambda m: [{'text':w['text'],'start':w['start'],'end':w['end']} for w in m.get('local_words',[]) if w['end']<=m['dur']+.2]
-    narr=script.get('narration',[]);ni=0
-    def add_src(m):
-        nonlocal shots
-        st=sum(x.dur for x in shots);words=root_words(m);shots.append(Shot('source',min(8,float(m['dur'])),Path(m['file']),0.0,'',words,st))
-        for g in cap_groups(words):groups.append({'start':st+g['start'],'end':st+g['end'],'text':g['text']})
-    def add_vo(text,broll=None):
-        nonlocal shots
-        p=root/'temp'/f'vo_{len(shots):03d}.mp3';p.parent.mkdir(parents=True,exist_ok=True);tts(text,p);d=audio_duration(p);st=sum(x.dur for x in shots);shots.append(Shot('narration',d,Path(broll['file']) if broll else None,0.0,text,None,st));
-        for g in cap_groups(proportional_words(text,st,d)):groups.append(g)
-    if downloaded:add_src(downloaded.pop(0))
-    for text in narr:
-        if text:add_vo(text,downloaded[0] if downloaded else None)
-        if downloaded:add_src(downloaded.pop(0))
-        if sum(s.dur for s in shots)>=54:break
-    for m in downloaded:
-        if sum(s.dur for s in shots)>=54:break
-        add_src(m)
-    total=sum(s.dur for s in shots)
-    if total<45:raise RuntimeError(f'Short edit only reached {total:.1f}s; agent will retry another story.')
-    if total>59:shots=shots[:]; raise RuntimeError(f'Short edit exceeded 59s at {total:.1f}s; agent will re-plan.')
+        m['file']=str(p);m['local_words']=local_words
+        downloaded.append(m)
+
+    if not downloaded:
+        raise RuntimeError('All automatic source downloads failed.')
+
+    def words_for(m):
+        return [w for w in (m.get('local_words') or []) if float(w.get('start',0)) <= float(m.get('dur',6))+.2]
+
+    narr=list(script.get('narration',[]) or [])
+    narr_i=0
+
+    def add_source(m):
+        st=sum(x.dur for x in shots)
+        dur=min(8.0,max(4.0,float(m.get('dur',6))))
+        words=words_for(m)
+        shots.append(Shot('source',dur,Path(m['file']),0.0,'',words,st))
+        for g in cap_groups(words):
+            groups.append({'start':st+g['start'],'end':st+g['end'],'text':g['text']})
+
+    def add_narration(text, broll=None):
+        st=sum(x.dur for x in shots)
+        p=root/'temp'/f'vo_{len(shots):03d}.mp3';p.parent.mkdir(parents=True,exist_ok=True)
+        tts(text,p);d=max(.5,audio_duration(p))
+        shots.append(Shot('narration',d,Path(broll['file']) if broll else None,0.0,text,None,st))
+        groups.extend(cap_groups(proportional_words(text,st,d)))
+
+    # Consequence-first rhythm: source -> narrator -> source -> narrator.
+    if downloaded:
+        add_source(downloaded.pop(0))
+    while downloaded and sum(x.dur for x in shots)<54:
+        if narr_i<len(narr):
+            add_narration(narr[narr_i],downloaded[0] if downloaded else None)
+            narr_i+=1
+        if downloaded and sum(x.dur for x in shots)<54:
+            add_source(downloaded.pop(0))
+        else:
+            break
+
+    # Pad only with remaining real footage; never synthesize visual filler.
+    while downloaded and sum(x.dur for x in shots)<54:
+        add_source(downloaded.pop(0))
+
+    total=sum(x.dur for x in shots)
+    if total<45:
+        raise RuntimeError(f'Short edit only reached {total:.1f}s; automatic source coverage was insufficient.')
+    if total>59:
+        raise RuntimeError(f'Short edit exceeded 59s at {total:.1f}s; automatic re-plan required.')
     root.joinpath('captions.json').write_text(json.dumps(groups,ensure_ascii=False,indent=2),encoding='utf-8')
     return shots,groups
 

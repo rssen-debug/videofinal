@@ -193,213 +193,200 @@ def news(q:str, n=10):
     return out
 
 def yt_search(q:str,n=12):
-    for client in ('android','web'):
-        p=run([sys.executable,'-m','yt_dlp','--flat-playlist','--dump-single-json','--skip-download','--extractor-args',f'youtube:player_client={client}',f'ytsearch{max(n*2,10)}:{q}'],timeout=180,check=False)
-        if p.returncode: continue
+    clients=('android_vr','android','web_embedded','tv','web','default')
+    cookie_file=os.environ.get('VIDEOFINAL_YT_COOKIES','').strip()
+    for client in clients:
+        cmd=[sys.executable,'-m','yt_dlp','--flat-playlist','--dump-single-json','--skip-download','--no-warnings',
+             '--extractor-args',f'youtube:player_client={client}',f'ytsearch{max(n*3,12)}:{q}']
+        if cookie_file and Path(cookie_file).exists():cmd += ['--cookies',cookie_file]
+        p=run(cmd,timeout=180,check=False)
+        if p.returncode:continue
         try:o=json.loads(p.stdout)
         except Exception:continue
         rows=[]
         for e in o.get('entries',[]) if isinstance(o,dict) else []:
             if not isinstance(e,dict):continue
-            vid=e.get('id'); u=e.get('webpage_url') or e.get('url') or (f'https://www.youtube.com/watch?v={vid}' if vid else '')
+            vid=e.get('id');u=e.get('webpage_url') or e.get('url') or (f'https://www.youtube.com/watch?v={vid}' if vid else '')
             if not u:continue
             rows.append({'id':vid or '','url':u,'title':clean(e.get('title','')),'uploader':clean(e.get('uploader') or e.get('channel') or ''),'channel_url':e.get('channel_url') or '','client':client})
-            if len(rows)>=n:return rows
+            if len(rows)>=n:break
         if rows:return rows
     return []
 
-def score_story(title:str, mode:str)->dict[str,Any]:
-    t=title.lower(); hook=5+sum(k in t for k in ('why','how','controversy','vs','banned','quit','return','secret','exposed'))
-    fresh=6+sum(k in t for k in ('today','latest','breaking','new','announced','update','returns'))
-    visual=6+sum(k in t for k in ('stream','live','fight','game','interview','trailer','record','launch'))
-    depth=5+sum(k in t for k in ('lawsuit','rise','fall','mystery','scandal','empire','history'))
-    raw=min(hook,10)*.30+min(fresh,10)*.24+min(visual,10)*.24+min(depth,10)*.22
-    return {'score':round(raw*10,1),'score_10':round(raw,1),'hook':min(hook,10),'freshness':min(fresh,10),'visual':min(visual,10),'depth':min(depth,10)}
-
-def niche_candidates(niche:str,mode:str,limit=10):
-    seeds=NICHES.get(niche,NICHES['internet']); rows=[]
-    for q in seeds:
-        rows += news(q,6); rows += yt_search(q,6)
-    if niche=='streamers':
-        rows += news('streamer drama',10)
-    seen=set(); unique=[]
-    for r in rows:
-        k=re.sub(r'\W+','',r.get('title','').lower())[:160]
-        if len(k)<12 or k in seen:continue
-        seen.add(k); r.update(score_story(r['title'],mode)); r['niche']=niche; unique.append(r)
-    unique.sort(key=lambda x:x['score'],reverse=True)
-    if llm_provider()!='none' and unique:
-        try:
-            sample=[{'i':i+1,'title':r['title'],'signal':r.get('signal'),'url':r.get('url')} for i,r in enumerate(unique[:24])]
-            obj=llm_json(f'Rank production opportunities for a {mode} in niche {niche}. Reject generic listicles and vague updates. Prefer a concrete event, strong visual evidence, a turn, and research depth. Give 0-100 scores. Return {{"items":[{{"i":1,"score":92,"reason":"..."}}]}}.\n'+json.dumps(sample,ensure_ascii=False),max_tokens=2200)
-            by={int(x.get('i')):x for x in obj.get('items',[]) if isinstance(x,dict)}
-            for i,r in enumerate(unique[:24],1):
-                if i in by:r['score']=max(0,min(100,float(by[i].get('score',r['score']))));r['reason']=clean(str(by[i].get('reason','')))
-            unique[:24]=sorted(unique[:24],key=lambda x:x['score'],reverse=True)
-        except Exception:pass
-    for r in unique:r['score_10']=round(r['score']/10,1)
-    return unique[:limit]
-
-# ---------------------------------------------------------------------------
-# STATE / RESEARCH
-
-@dataclass
-class Shot:
-    kind:str
-    dur:float
-    clip:Optional[Path]=None
-    cut:float=0.0
-    text:str=''
-    source_words:Optional[list[dict[str,Any]]]=None
-    start:float=0.0
-
-def project_for(topic,mode,res):
-    root=PROJECTS/slug(topic);root.mkdir(parents=True,exist_ok=True)
-    state={'schema':'videofinal/2026-autopilot','topic':topic,'mode':mode,'resolution':res,'status':'running','events':[],'errors':[],'stages':[],'artifacts':{}}
-    (root/'state.json').write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding='utf-8')
-    return root,state
-
-def stage(root,state,name,**data):
-    state['stage']=name;state['stages'].append({'name':name,'at':dt.datetime.now(dt.timezone.utc).isoformat(),**data})
-    (root/'state.json').write_text(json.dumps(state,ensure_ascii=False,indent=2),encoding='utf-8')
-
-def research(topic:str)->dict[str,Any]:
-    rows=news(topic,12)
-    entities=[]; queries=[topic]
-    if llm_provider()!='none':
-        try:
-            obj=llm_json('Extract entities and follow-up queries for this story. Do not invent facts. Return {"entities":[],"queries":[]}.\n'+topic+'\n'+json.dumps(rows,ensure_ascii=False),max_tokens=800)
-            entities=[clean(x) for x in obj.get('entities',[]) if clean(str(x))];queries += [clean(x) for x in obj.get('queries',[]) if clean(str(x))][:5]
-        except Exception:pass
-    claims=[{'text':r['title'],'source_url':r['url'],'kind':'reported'} for r in rows]
-    for q in queries[1:]:
-        for r in news(q,6):
-            claims.append({'text':r['title'],'source_url':r['url'],'kind':'reported'})
-    return {'claims':claims[:60],'entities':entities,'queries':queries[:6],'news':rows}
-
-# ---------------------------------------------------------------------------
-# SOURCE TRANSCRIPTS / ASR / MOMENTS
-
-def parse_vtt(path:Path):
-    if not path.exists():return []
-    t=path.read_text(encoding='utf-8',errors='ignore');out=[]
-    rx=re.compile(r'(\d{2}:\d{2}:\d{2}\.\d{3})\s+-->\s+(\d{2}:\d{2}:\d{2}\.\d{3}).*?\n(.*?)(?=\n\n|\Z)',re.S)
-    def ts(x):
-        h,m,s=x.split(':');return int(h)*3600+int(m)*60+float(s)
-    for m in rx.finditer(t):
-        body=clean(re.sub(r'<[^>]+>','',m.group(3)).replace('\n',' '))
-        body=re.sub(r'\b(?:music|applause|laughs?)\b','',body,flags=re.I).strip()
-        if body:out.append({'start':ts(m.group(1)),'end':ts(m.group(2)),'text':body})
-    return out
-
-def whisper_words(path:Path):
-    global _ASR
-    try:
-        from faster_whisper import WhisperModel
-    except Exception:return []
-    try:
-        if _ASR is None:_ASR=WhisperModel(os.environ.get('VIDEOFINAL_ASR_MODEL','base'),device=os.environ.get('VIDEOFINAL_ASR_DEVICE','cpu'),compute_type=os.environ.get('VIDEOFINAL_ASR_COMPUTE','int8'))
-        segs,_=_ASR.transcribe(str(path),word_timestamps=True)
-        return [{'text':clean(w.word),'start':float(w.start),'end':float(w.end)} for seg in segs for w in (seg.words or []) if clean(w.word)]
-    except Exception:return []
-
-def source_subs(url:str, tag:str):
-    d=CACHE/'subs';d.mkdir(parents=True,exist_ok=True);pref=d/tag
-    for client in ('android','web'):
-        run([sys.executable,'-m','yt_dlp','--skip-download','--write-auto-subs','--write-subs','--sub-langs','en.*,en','--sub-format','vtt','--extractor-args',f'youtube:player_client={client}','-o',str(pref)+'.%(ext)s',url],timeout=240,check=False)
-        v=list(d.glob(tag+'*.vtt'))
-        for p in v:
-            cues=parse_vtt(p)
-            if cues:return cues
-    return []
-
-def source_info(url:str):
-    for client in ('android','web','web_embedded','tv'):
-        p=run([sys.executable,'-m','yt_dlp','--dump-single-json','--skip-download','--extractor-args',f'youtube:player_client={client}',url],timeout=180,check=False)
-        if p.returncode:continue
-        try:
-            o=json.loads(p.stdout)
-            return {'duration':float(o.get('duration') or 60),'title':o.get('title',''),'uploader':o.get('uploader') or o.get('channel',''),'id':o.get('id',''),'client':client}
-        except Exception:
-            continue
-    # A short probe can still be attempted even when metadata extraction is imperfect.
-    return {'duration':60.0}
-
-def vtt_moments(cues,wanted=3):
-    windows=[]
-    for i,c in enumerate(cues):
-        start=c['start'];parts=[];end=start
-        for j in range(i,min(len(cues),i+10)):
-            if cues[j]['start']-start>8:break
-            parts.append(cues[j]['text']);end=cues[j]['end'];dur=end-start
-            text=clean(' '.join(parts))
-            if 4<=dur<=8 and len(text.split())>=6:windows.append({'cut':max(0,start-.18),'dur':min(8,end-max(0,start-.18)+.32),'quote':text})
-    seen=set();out=[]
-    for w in sorted(windows,key=lambda x:len(x['quote']),reverse=True):
-        k=re.sub(r'\W+','',w['quote'].lower())[:120]
-        if k not in seen:seen.add(k);out.append(w)
-    return out[:wanted]
-
-def asr_moments(source,root,wanted=3):
-    dur=float(source.get('duration') or 0)
-    if dur<5 or not has_module('faster_whisper'):return []
-    length=min(9,max(5.5,dur*.16));positions=[0,max(0,dur*.28-length/2),max(0,dur*.55-length/2),max(0,dur*.80-length/2)]
-    out=[]
-    for cut in sorted(set(round(max(0,min(float(x),max(0,dur-length))),2) for x in positions)):
-        key=hashlib.sha1((source['url']+f'|{cut}').encode()).hexdigest()[:12];p=ASSET_CLIPS/f'probe_{key}.mp4'
-        try:
-            if not p.exists():download_segment(source['url'],cut,length,p)
-            words=whisper_words(p)
-            if not words:continue
-            absw=[{'text':w['text'],'start':w['start']+cut,'end':w['end']+cut} for w in words]
-            wins=[]
-            for i,w in enumerate(absw):
-                st=w['start'];buf=[];en=st
-                for z in absw[i:i+45]:
-                    if z['start']-st>8:break
-                    buf.append(z);en=z['end'];d=en-st;t=clean(' '.join(a['text'] for a in buf))
-                    if 4<=d<=8 and len(t.split())>=6:wins.append({'cut':max(0,st-.18),'dur':min(8,en-max(0,st-.18)+.32),'quote':t,'asr_words':absw})
-            out+=sorted(wins,key=lambda x:len(x['quote'].split()),reverse=True)[:2]
-        except Exception:pass
-        if len(out)>=wanted:break
-    return out[:wanted]
+def _topic_entities(topic:str,research:dict[str,Any])->list[str]:
+    ents=[clean(str(x)) for x in (research.get('entities',[]) or []) if clean(str(x))]
+    if ents:return list(dict.fromkeys(ents))[:6]
+    hits=[]
+    for m in re.finditer(r'\b[A-Z][A-Za-z0-9_-]{2,}(?:\s+[A-Z][A-Za-z0-9_-]{2,})?\b',topic):
+        x=clean(m.group(0))
+        if x.lower() not in {'The','This','What','After','How','Why','And'} and x not in hits:hits.append(x)
+    return hits[:6]
 
 def choose_sources(topic,research,count=7):
-    ents=research.get('entities',[]);queries=[topic]+ents[:3]+research.get('queries',[])[1:4]
+    ents=_topic_entities(topic,research)
+    queries=[topic]
+    for e in ents:
+        queries.extend([f'"{e}" official',f'"{e}" live interview',f'"{e}" full stream',f'"{e}" original'])
+    queries += [q for q in (research.get('queries',[]) or []) if q and q not in queries]
     cand=[];seen=set()
-    for q in queries:
-        for r in yt_search(q,10):
+    for q in queries[:18]:
+        for r in yt_search(q,8):
             if r['url'] in seen:continue
-            seen.add(r['url']);blob=(r['title']+' '+r['uploader']).lower();score=.30
+            seen.add(r['url'])
+            blob=(r['title']+' '+r['uploader']).lower();score=.25
             for e in ents:
-                if e.lower() in blob:score+=.18
-            if 'official' in blob or any(k in blob for k in ('tv','live','interview','podcast','channel')):score+=.08
-            if any(k in blob for k in ('reaction','fan','edit','compilation','highlights','shorts')):score-=.20
+                parts=[p.lower() for p in e.split() if len(p)>=4]
+                if parts and all(p in blob for p in parts):score+=.20
+            if any(k in blob for k in ('official','original','live','interview','podcast','channel','network')):score+=.10
+            if any(k in blob for k in ('reaction','fan edit','fan-made','compilation','commentary','shorts','highlights','reupload')):score-=.28
             r['party_score']=round(max(0,min(.99,score)),3);cand.append(r)
     cand.sort(key=lambda x:x['party_score'],reverse=True)
     if llm_provider()!='none' and cand:
         try:
-            sample=[{'i':i+1,'title':r['title'],'uploader':r['uploader'],'url':r['url'],'party_score':r['party_score']} for i,r in enumerate(cand[:35])]
-            obj=llm_json('Select original/first-party audiovisual sources for this story. Prefer the speaker, creator, company, event, network, or original interview. Reject commentary/reuploads/fan edits. Return {"pick":[1,2,3,4,5,6,7]}.\n'+json.dumps(sample,ensure_ascii=False),max_tokens=1300)
+            sample=[{'i':i+1,'title':r['title'],'uploader':r['uploader'],'url':r['url'],'score':r['party_score']} for i,r in enumerate(cand[:60])]
+            obj=llm_json('Select source videos for a fact-first internet documentary. Prefer original/first-party speaker, creator, company, event, network, interview, or livestream. A single source may supply many different moments. Reject fan edits, commentary, reuploads and duplicate coverage. Return {"pick":[1,2,3,4,5,6,7]}.\n'+json.dumps(sample,ensure_ascii=False),max_tokens=1700)
             picks=[]
             for i in obj.get('pick',[])[:count]:
-                try:picks.append(cand[int(i)-1])
+                try:
+                    row=cand[int(i)-1]
+                    if row not in picks:picks.append(row)
                 except Exception:pass
             if picks:cand=picks
         except Exception:pass
-    return cand[:count]
+    return cand[:max(1,count)]
+
+def source_info(url:str):
+    cookie_file=os.environ.get('VIDEOFINAL_YT_COOKIES','').strip()
+    for client in ('android_vr','android','web_embedded','tv','web','default'):
+        cmd=[sys.executable,'-m','yt_dlp','--dump-single-json','--skip-download','--no-warnings','--extractor-args',f'youtube:player_client={client}',url]
+        if cookie_file and Path(cookie_file).exists():cmd += ['--cookies',cookie_file]
+        p=run(cmd,timeout=180,check=False)
+        if p.returncode:continue
+        try:
+            o=json.loads(p.stdout)
+            return {'duration':float(o.get('duration') or 60),'title':o.get('title',''),'uploader':o.get('uploader') or o.get('channel',''),'id':o.get('id',''),'client':client}
+        except Exception:continue
+    return {'duration':60.0}
+
+def parse_vtt_file(path:Path):
+    if not path.exists():return []
+    return parse_vtt(path)
+
+def source_subs(url:str, tag:str):
+    d=CACHE/'subs';d.mkdir(parents=True,exist_ok=True);pref=d/tag
+    cookie_file=os.environ.get('VIDEOFINAL_YT_COOKIES','').strip()
+    clients=('android_vr','web_embedded','android','tv','web','default')
+    for client in clients:
+        cmd=[sys.executable,'-m','yt_dlp','--skip-download','--write-auto-subs','--write-subs','--sub-langs','en.*,en','--sub-format','vtt','--convert-subs','vtt','--no-warnings','--extractor-args',f'youtube:player_client={client}','-o',str(pref)+'.%(ext)s',url]
+        if cookie_file and Path(cookie_file).exists():cmd += ['--cookies',cookie_file]
+        run(cmd,timeout=240,check=False)
+        for p in d.glob(tag+'*.vtt'):
+            cues=parse_vtt_file(p)
+            if cues:return cues
+    return []
+
+def vtt_moments(cues,wanted=8):
+    windows=[];seen=set()
+    for i,c in enumerate(cues):
+        start=c['start'];parts=[];end=start
+        for j in range(i,min(len(cues),i+12)):
+            if cues[j]['start']-start>8:break
+            parts.append(cues[j]['text']);end=cues[j]['end'];dur=end-start;text=clean(' '.join(parts))
+            if 4<=dur<=8 and len(text.split())>=6:
+                key=re.sub(r'\W+','',text.lower())[:140]
+                if key in seen:continue
+                seen.add(key);windows.append({'cut':max(0,start-.18),'dur':min(8,end-max(0,start-.18)+.35),'quote':text})
+            if len(windows)>=wanted*3:break
+        if len(windows)>=wanted*3:break
+    if llm_provider()!='none' and windows:
+        try:
+            sample=[{'i':i+1,'quote':w['quote'],'cut':w['cut']} for i,w in enumerate(windows[:80])]
+            obj=llm_json('Pick the strongest complete spoken moments from this transcript. Prefer concrete claims, emotional turns, answers and moments that explain the story. Return {"pick":[1,2,3,4,5,6,7,8]}.\n'+json.dumps(sample,ensure_ascii=False),max_tokens=1500)
+            picked=[]
+            for i in obj.get('pick',[])[:wanted]:
+                try:picked.append(windows[int(i)-1])
+                except Exception:pass
+            if picked:windows=picked
+        except Exception:pass
+    return windows[:wanted]
+
+def asr_moments(source,root,wanted=8):
+    dur=float(source.get('duration') or 0)
+    if dur<5 or not has_module('faster_whisper'):return []
+    length=min(8.5,max(5.5,dur*.10));positions=[dur*x for x in (0,.10,.20,.30,.40,.50,.60,.70,.80,.90)]
+    out=[]
+    for raw_cut in positions:
+        cut=round(max(0,min(float(raw_cut),max(0,dur-length))),2)
+        key=hashlib.sha1((source['url']+f'|asr|{cut}').encode()).hexdigest()[:12];p=ASSET_CLIPS/f'probe_{key}.mp4'
+        try:
+            if not p.exists():download_segment(source['url'],cut,length,p)
+            words=whisper_words(p)
+            if not words:continue
+            windows=[]
+            for i,w in enumerate(words):
+                st=float(w['start']);buf=[];en=st
+                for z in words[i:i+50]:
+                    if float(z['start'])-st>8:break
+                    buf.append(z);en=float(z['end']);txt=clean(' '.join(a['text'] for a in buf));d=en-st
+                    if 4<=d<=8 and len(txt.split())>=6:
+                        windows.append({'cut':max(0,cut+st-.18),'dur':min(8,en-st+.45),'quote':txt,'asr_words':[{'text':a['text'],'start':float(a['start'])+cut,'end':float(a['end'])+cut} for a in buf]})
+            windows.sort(key=lambda x:len(x['quote'].split()),reverse=True)
+            for w in windows[:3]:out.append(w)
+        except Exception:continue
+        if len(out)>=wanted:break
+    seen=set();uniq=[]
+    for w in out:
+        k=re.sub(r'\W+','',w['quote'].lower())[:140]
+        if k in seen:continue
+        seen.add(k);uniq.append(w)
+    return uniq[:wanted]
 
 def download_segment(url:str,cut:float,dur:float,out:Path):
     out.parent.mkdir(parents=True,exist_ok=True)
-    base=[sys.executable,'-m','yt_dlp','--no-progress','--force-keyframes-at-cuts','--merge-output-format','mp4','-f','bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best','--download-sections',f'*{cut:.2f}-{cut+dur:.2f}','-o',str(out)]
-    for client in ('android','web'):
-        p=run(base[:-2]+['--extractor-args',f'youtube:player_client={client}']+base[-2:]+[url],timeout=700,check=False)
-        if p.returncode==0 and out.exists():return out
-        if out.exists():out.unlink()
+    cookie_file=os.environ.get('VIDEOFINAL_YT_COOKIES','').strip()
+    formats=('bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best','best[height<=720]/best')
+    clients=('android_vr','android','web_embedded','tv','web','default')
+    last=''
+    for fmt in formats:
+        for client in clients:
+            cmd=[sys.executable,'-m','yt_dlp','--no-progress','--force-keyframes-at-cuts','--merge-output-format','mp4','-f',fmt,'--download-sections',f'*{cut:.2f}-{cut+dur:.2f}','--extractor-args',f'youtube:player_client={client}','-o',str(out),url]
+            if cookie_file and Path(cookie_file).exists():cmd += ['--cookies',cookie_file]
+            p=run(cmd,timeout=700,check=False);last=(p.stderr or p.stdout or '')[-1200:]
+            if p.returncode==0 and out.exists() and out.stat().st_size>10000:return out
+            if out.exists():
+                try:out.unlink()
+                except Exception:pass
+    # Full-download trim fallback; this mirrors the proven Arena strategy.
     temp=out.with_suffix('.source.mp4')
-    run([sys.executable,'-m','yt_dlp','--no-progress','--merge-output-format','mp4','--extractor-args','youtube:player_client=android','-f','bestvideo[height<=720]+bestaudio/best[height<=720]/best','-o',str(temp),url],timeout=1200)
-    run([exe('ffmpeg'),'-y','-v','error','-ss',str(cut),'-t',str(dur),'-i',str(temp),'-vf','scale=-2:720,fps=30,setsar=1','-c:v','libx264','-crf','20','-pix_fmt','yuv420p','-c:a','aac','-b:a','128k',str(out)],timeout=1000)
+    cmd=[sys.executable,'-m','yt_dlp','--no-progress','--merge-output-format','mp4','--extractor-args','youtube:player_client=android_vr,android,web_embedded,tv,default','-f',formats[0],'-o',str(temp),url]
+    if cookie_file and Path(cookie_file).exists():cmd += ['--cookies',cookie_file]
+    p=run(cmd,timeout=1200,check=False)
+    if p.returncode or not temp.exists():raise RuntimeError('source download failed: '+last)
+    run([exe('ffmpeg'),'-y','-v','error','-ss',str(cut),'-t',str(dur),'-i',str(temp),'-vf','scale=-2:720,fps=30,setsar=1','-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p','-c:a','aac','-b:a','128k','-movflags','+faststart',str(out)],timeout=1000)
     return out
+
+def source_moment_pipeline(topic,research,root,mode,wanted=12):
+    stage(root,STATE,'source_hunt',mode=mode)
+    sources=choose_sources(topic,research,count=7)
+    if not sources:
+        raise RuntimeError('No audiovisual candidates found after automatic discovery.')
+    moments=[]
+    for si,s in enumerate(sources):
+        source=dict(s)
+        try:source.update(source_info(source['url']))
+        except Exception:source.setdefault('duration',60.0)
+        try:cues=source_subs(source['url'],hashlib.sha1(source['url'].encode()).hexdigest()[:15])
+        except Exception:cues=[]
+        if cues:
+            for m in vtt_moments(cues,wanted=min(8,wanted-len(moments))):
+                m.update(source_index=si,source_url=source['url'],source_title=source.get('title',''),uploader=source.get('uploader',''),subtitle_cues=cues)
+                moments.append(m)
+        else:
+            for m in asr_moments(source,root,wanted=min(8,wanted-len(moments))):
+                m.update(source_index=si,source_url=source['url'],source_title=source.get('title',''),uploader=source.get('uploader',''))
+                moments.append(m)
+        if len(moments)>=wanted:break
+    return sources,moments[:wanted]
 
 # ---------------------------------------------------------------------------
 # SCRIPTING / TTS

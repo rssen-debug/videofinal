@@ -570,8 +570,8 @@ def short_shots(topic,research,root,res):
     if len(moments)<3:raise RuntimeError('Could not obtain three usable spoken source moments after subtitles and Whisper probes.')
     script=build_script_short(topic,research,moments);shots=[];groups=[]
     # Real speaker first, then narration, then speaker, then narration/source alternation.
-    order=script.get('order',[]) or list(range(3));queue=[moments[int(i)-1] if isinstance(i,int) and i>0 and i<=len(moments) else moments[k] for k,i in enumerate(order)]
-    # Above accepts either 1-based LLM order or fallback; also ensure unique moments.
+    order=script.get('order',[]) or list(range(3))
+    # Accept either 1-based LLM order or zero-based fallback order; drop invalid/duplicate picks.
     seen=set();queue=[]
     for i in order:
         try:m=moments[int(i)-1] if int(i)>0 else moments[int(i)]
@@ -586,7 +586,11 @@ def short_shots(topic,research,root,res):
         key=hashlib.sha1((m['source_url']+f'|{m['cut']:.2f}|{m['dur']:.2f}').encode()).hexdigest()[:12];p=ASSET_CLIPS/f'{slug(topic)}_short_{i:02d}_{key}.mp4'
         if not p.exists():download_segment(m['source_url'],m['cut'],m['dur'],p)
         local_words=m.get('asr_words') or []
-        if not local_words and has_module('faster_whisper'):local_words=whisper_words(p)
+        if local_words:
+            # Probe-ASR timestamps are absolute source times; downloaded clip words must be local.
+            local_words=[{'text':w['text'],'start':max(0,float(w['start'])-float(m['cut'])),'end':max(0,float(w['end'])-float(m['cut']))} for w in local_words]
+        elif has_module('faster_whisper'):
+            local_words=whisper_words(p)
         m['file']=str(p);m['local_words']=local_words;downloaded.append(m)
     root_words=lambda m: [{'text':w['text'],'start':w['start'],'end':w['end']} for w in m.get('local_words',[]) if w['end']<=m['dur']+.2]
     narr=script.get('narration',[]);ni=0

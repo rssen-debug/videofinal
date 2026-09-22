@@ -6,3 +6,5 @@ projects/
 *.tmp
 .env
 *.env
+
+youtube2026/*.mp4

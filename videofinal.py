@@ -470,30 +470,49 @@ def reddit_hot(subreddit: str = "LivestreamFail", limit: int = 20) -> list[dict[
 STREAMER_WATCHLIST = [
     "Kai Cenat", "IShowSpeed", "Speed", "xQc", "Jynxzi", "Adin Ross",
     "HasanAbi", "Clix", "Sketch", "Carter Efe", "Fanum", "Duke Dennis",
-    "AMP", "FaZe", "Drake", "Marlon",
+    "AMP", "FaZe", "Drake", "Marlon", "Trainwreckstv", "Pokimane",
+    "Nmplol", "Asmongold", "CaseOh", "PlaqueBoyMax", "Rayasianboy",
 ]
-
+STREAMER_QUERY_ALIASES = {
+    "Kai Cenat": ["Kai Cenat latest", "Kai Cenat Live", "Kai Cenat Kick", "Kai Cenat response"],
+    "IShowSpeed": ["IShowSpeed latest", "IShowSpeed Live", "IShowSpeed Kick", "Speed response"],
+    "xQc": ["xQc latest", "xQc Live", "xQc Kick", "xQc response"],
+    "Jynxzi": ["Jynxzi latest", "Jynxzi Live", "Jynxzi response"],
+    "Adin Ross": ["Adin Ross latest", "Adin Ross Live", "Adin Ross response"],
+    "HasanAbi": ["HasanAbi latest", "HasanAbi Live", "HasanAbi response"],
+    "Clix": ["Clix latest", "Clix Live", "Clix response"],
+    "Sketch": ["Sketch streamer latest", "Sketch Live", "Sketch response"],
+    "Carter Efe": ["Carter Efe latest", "Carter Efe Live", "Carter Efe response"],
+    "Fanum": ["Fanum latest", "Fanum Live", "Fanum response"],
+    "Duke Dennis": ["Duke Dennis latest", "Duke Dennis Live", "Duke Dennis response"],
+    "Drake": ["Drake streamer", "Drake Kai Cenat", "Drake Kick streamer"],
+    "Marlon": ["Marlon streamer", "Marlon Kick", "Marlon Drake", "Marlon live"],
+}
 def streamer_search_queries() -> list[str]:
-    return list(dict.fromkeys([
-        "Kai Cenat latest streamer", "IShowSpeed latest streamer", "Speed latest streamer",
-        "xQc latest streamer", "Jynxzi latest streamer", "Adin Ross latest streamer",
-        "HasanAbi latest streamer", "Clix latest streamer", "Sketch latest streamer",
-        "Marlon Kick streamer", "Drake streamer", "Kai Cenat Drake", "Kai Cenat Kick",
-        "IShowSpeed Kick", "streamer drama Kick", "streamer controversy Twitch",
-    ]))
+    q=[]
+    for arr in STREAMER_QUERY_ALIASES.values():
+        q.extend(arr)
+    q.extend([
+        "streamer drama Kick latest", "Kick streamer controversy latest",
+        "LivestreamFail streamer latest", "streamer beef latest",
+        "streamer responds latest", "streamer banned latest", "streamer comeback latest",
+    ])
+    return list(dict.fromkeys(q))
 
-def streamer_relevance(title: str, source: str = "") -> float:
-    blob = (title + " " + source).lower()
+def streamer_relevance(title: str, source: str = "", uploader: str = "") -> float:
+    blob = (title + " " + source + " " + uploader).lower()
     score = 0.0
     for name in STREAMER_WATCHLIST:
         if name.lower() in blob:
-            score += 0.28
-    if any(k in blob for k in ("kick.com", "livestreamfail", "twitch", "streamer", "stream", "vod", "live")):
+            score += 0.24 if len(name) > 5 else 0.10
+    if any(k in blob for k in ("kick.com", "livestreamfail", "twitch", "streamer", "vod", "live stream", "livestream")):
+        score += 0.18
+    if any(k in blob for k in ("controversy", "drama", "beef", "banned", "quit", "returns", "calls out", "responds", "response", "reacts", "incident", "clash", "fallout", "exposed")):
         score += 0.20
-    if any(k in blob for k in ("controversy", "drama", "beef", "banned", "quit", "returns", "calls out", "responds", "reacts", "incident", "clash")):
-        score += 0.16
-    if any(k in blob for k in ("listicle", "best", "how to stream", "tutorial", "beginner", "setup guide")):
-        score -= 0.32
+    if any(k in blob for k in ("latest", "breaking", "today", "2026", "update")):
+        score += 0.08
+    if any(k in blob for k in ("listicle", "how to stream", "tutorial", "beginner", "setup guide", "prime video", "shows streaming", "romance", "ranked shows")):
+        score -= 0.50
     return max(0.0, min(1.0, score))
 
 
@@ -528,7 +547,7 @@ def niche_rows(niche: str, mode: str, limit: int = 10) -> list[dict[str, Any]]:
         unique.append(row)
 
     if niche == "streamers":
-        unique.sort(key=lambda r: streamer_relevance(r.get("title", ""), r.get("source", "") + " " + r.get("uploader", "")), reverse=True)
+        unique.sort(key=lambda r: streamer_relevance(r.get("title", ""), r.get("source", ""), r.get("uploader", "")), reverse=True)
         relevant = [r for r in unique if streamer_relevance(r.get("title", ""), r.get("source", "") + " " + r.get("uploader", "")) >= 0.20]
         if len(relevant) >= 4:
             unique = relevant
@@ -545,8 +564,10 @@ def niche_rows(niche: str, mode: str, limit: int = 10) -> list[dict[str, Any]]:
         depth = 5 + sum(1 for k in ("lawsuit", "history", "rise", "fall", "mystery", "scandal", "drama", "incident") if k in t)
         raw = 0.30 * min(hook, 10) + 0.24 * min(freshness, 10) + 0.22 * min(visual, 10) + 0.24 * min(depth, 10)
         if niche == "streamers":
-            raw += 0.28 * streamer_relevance(row.get("title", ""), row.get("source", "") + " " + row.get("uploader", ""))
-        base.append({**row, "heuristic": round(min(10.0, raw) * 10, 1), "niche": niche, "mode": mode})
+            raw += 2.2 * streamer_relevance(row.get("title", ""), row.get("source", ""), row.get("uploader", ""))
+        if any(k in t for k in ("how to stream", "beginner guide", "setup guide", "best romance", "prime video", "streaming shows", "ranked")):
+            raw -= 4.5
+        base.append({**row, "heuristic": round(max(0.0, min(10.0, raw)) * 10, 1), "niche": niche, "mode": mode})
 
     base.sort(key=lambda x: x["heuristic"], reverse=True)
 
@@ -772,71 +793,70 @@ def _deterministic_entities(topic: str, research: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(found))[:8]
 
 
-def choose_sources(topic: str, research: dict[str, Any], count: int = 5) -> list[dict[str, Any]]:
+def choose_sources(topic: str, research: dict[str, Any], count: int = 7) -> list[dict[str, Any]]:
     entities: list[str] = _deterministic_entities(topic, research)
     if llm_provider() != "none":
         try:
             obj = llm_json(
-                f"Extract the main people/brands/channels directly relevant to this story. "
-                f"Return JSON {{\"entities\":[\"...\"]}}. Story: {topic}\nResearch: "
-                + json.dumps(research.get("claims", [])[:20], ensure_ascii=False)[:9000],
+                "Extract the main creators/people/channels directly relevant to this story. "
+                'Return JSON {"entities":["..."]}.\n' + topic + "\n" +
+                json.dumps(research.get("claims", [])[:20], ensure_ascii=False)[:9000],
                 max_tokens=500,
             )
-            entities = [norm_text(x) for x in obj.get("entities", []) if norm_text(x)]
+            ents = [norm_text(x) for x in obj.get("entities", []) if norm_text(x)]
+            if ents:
+                entities = ents
         except Exception:
             pass
 
-    queries = [topic]
-    for entity in entities[:6]:
-        queries.extend([f"{entity} original stream", f"{entity} live stream", f"{entity} interview", f"{entity} response", f"{entity} clip"])
-    queries.extend([q for q in research.get("queries", []) if q])
-    queries = list(dict.fromkeys(queries))[:18]
-    candidates: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for q in queries:
-        for row in yt_candidates(q, limit=10):
+    queries=[topic]
+    for entity in entities[:8]:
+        queries += [
+            f"{entity} original stream", f"{entity} live stream", f"{entity} interview",
+            f"{entity} response", f"{entity} clip", f"{entity} latest"
+        ]
+    queries += [q for q in research.get("queries", []) if q]
+    lower_topic=topic.lower()
+    if any(x in lower_topic for x in ("streamer","kick","twitch","kai cenat","ishowspeed","xqc","jynxzi","adin ross","marlon")):
+        queries += streamer_search_queries()
+
+    candidates=[];seen=set()
+    for q in list(dict.fromkeys(queries))[:45]:
+        for row in yt_candidates(q, limit=8):
             if row["url"] in seen:
                 continue
             seen.add(row["url"])
-            row["party_score"] = round(source_is_plausibly_first_party(row, entities), 3)
+            row["party_score"]=round(source_is_plausibly_first_party(row, entities),3)
+            row["streamer_score"]=round(streamer_relevance(row.get("title",""),row.get("url",""),row.get("uploader","")),3) if any(x in lower_topic for x in ("streamer","kick","twitch")) else 0.0
+            if any(x in lower_topic for x in ("streamer","kick","twitch")) and row["streamer_score"] < 0.10:
+                continue
             candidates.append(row)
+
+    candidates.sort(key=lambda r:(r.get("streamer_score",0),r["party_score"]),reverse=True)
     if not candidates:
         return []
 
-    candidates.sort(key=lambda x: x["party_score"], reverse=True)
-
     if llm_provider() != "none":
         try:
-            sample = [
-                {
-                    "i": i + 1,
-                    "title": r["title"],
-                    "uploader": r["uploader"],
-                    "url": r["url"],
-                    "party_score": r["party_score"],
-                }
-                for i, r in enumerate(candidates[:30])
-            ]
-            obj = llm_json(
-                "You are a source editor. Select the cleanest original/first-party audiovisual "
-                "sources for a factual internet story. Prefer the speaker's own channel, official "
-                "company/event channel, or the original interview/show source. Reject fan edits, "
-                "reuploads, compilations, commentary channels and obvious mirrors. "
-                'Return JSON {"pick":[1,2,3,4,5]}.\n' + json.dumps(sample, ensure_ascii=False),
-                max_tokens=1000,
+            sample=[{"i":i+1,"title":r["title"],"uploader":r["uploader"],"url":r["url"],
+                     "party_score":r["party_score"],"streamer_score":r.get("streamer_score",0)}
+                    for i,r in enumerate(candidates[:60])]
+            obj=llm_json(
+                "You are the FOOTAGE agent. Choose actual audiovisual sources for a creator story. "
+                "Prefer the creator's own YouTube/Kick/Twitch material, original interviews, official event feeds, "
+                "or a clearly identifiable primary recording. Reject news articles represented as if they were clips, "
+                "fan edits, compilations, reactions, mirrors and generic tutorials. "
+                'Return JSON {"pick":[1,2,3,4,5,6,7]}.\n'+json.dumps(sample,ensure_ascii=False),
+                max_tokens=1500,
             )
-            picks = []
-            for n in obj.get("pick", [])[:count]:
-                try:
-                    picks.append(candidates[int(n) - 1])
-                except Exception:
-                    pass
-            if len(picks) >= min(3, count):
-                candidates = picks
+            picks=[]
+            for n in obj.get("pick",[])[:count]:
+                try:picks.append(candidates[int(n)-1])
+                except Exception:pass
+            if picks:candidates=picks
         except Exception:
             pass
     return candidates[:count]
-
 
 def choose_dialogue_segments(source: dict[str, Any], cues: list[dict[str, Any]],
                              mode: str, wanted: int = 2) -> list[dict[str, Any]]:

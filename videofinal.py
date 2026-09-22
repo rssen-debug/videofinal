@@ -715,7 +715,7 @@ def source_meta(url: str, cache_dir: Path) -> dict[str, Any]:
         except Exception:
             pass
     last_err = "source metadata failed"
-    for client in ("android", "web"):
+    for client in ("android_vr", "android", "web_embedded", "tv", "default", "web"):
         proc = run_cmd(
             [
                 sys.executable, "-m", "yt_dlp",
@@ -1001,47 +1001,63 @@ def automatic_probe_moments(source: dict[str, Any], project: Project, wanted: in
     return all_moments[:wanted]
 
 
+def _media_duration(path: Path) -> float:
+    try:
+        return float(run_cmd([ffprobe(), "-v", "error", "-show_entries", "format=duration",
+                              "-of", "default=nw=1:nk=1", str(path)], timeout=90).stdout.strip())
+    except Exception:
+        return 0.0
+
+def _usable_download(path: Path, requested: float) -> bool:
+    return path.exists() and path.stat().st_size > 12000 and _media_duration(path) >= max(1.0, requested * 0.90)
+
 def download_source_segment(url: str, cut: float, dur: float, out: Path) -> Path:
     out.parent.mkdir(parents=True, exist_ok=True)
-    # Android client first, then default client as fallback.
-    base = [
-        sys.executable, "-m", "yt_dlp",
-        "--no-progress",
-        "--force-keyframes-at-cuts",
-        "--merge-output-format", "mp4",
-        "-f", "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]/best",
-        "--download-sections", f"*{cut:.2f}-{cut + dur:.2f}",
-        "-o", str(out),
-    ]
-    for client in ("android", "web"):
-        cmd = base[:-2] + ["--extractor-args", f"youtube:player_client={client}"] + base[-2:] + [url]
-        proc = run_cmd(cmd, timeout=600, check=False)
-        if proc.returncode == 0 and out.exists():
-            return out
-        if out.exists():
-            try:
-                out.unlink()
-            except Exception:
-                pass
+    formats = (
+        "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]/best",
+        "best[height<=720]/best",
+    )
+    last = ""
+    for fmt in formats:
+        for client in ("android_vr", "android", "web_embedded", "tv", "default", "web"):
+            cmd = [
+                sys.executable, "-m", "yt_dlp", "--no-progress", "--force-keyframes-at-cuts",
+                "--merge-output-format", "mp4", "-f", fmt,
+                "--download-sections", f"*{cut:.2f}-{cut + dur:.2f}",
+                "--extractor-args", f"youtube:player_client={client}",
+                "-o", str(out), url,
+            ]
+            proc = run_cmd(cmd, timeout=700, check=False)
+            last = (proc.stderr or proc.stdout or "")[-1400:]
+            if proc.returncode == 0 and _usable_download(out, dur):
+                return out
+            if out.exists():
+                try: out.unlink()
+                except Exception: pass
 
-    # Last fallback: normal download then trim with ffmpeg.
     temp = out.with_suffix(".source.mp4")
-    cmd = [
-        sys.executable, "-m", "yt_dlp",
-        "--no-progress",
-        "--merge-output-format", "mp4",
-        "--extractor-args", "youtube:player_client=android",
-        "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
-        "-o", str(temp), url,
-    ]
-    run_cmd(cmd, timeout=900)
+    for client in ("android_vr", "android", "web_embedded", "tv", "default"):
+        proc = run_cmd([
+            sys.executable, "-m", "yt_dlp", "--no-progress", "--merge-output-format", "mp4",
+            "-f", formats[0], "--extractor-args", f"youtube:player_client={client}",
+            "-o", str(temp), url
+        ], timeout=1200, check=False)
+        last = (proc.stderr or proc.stdout or "")[-1400:]
+        if proc.returncode == 0 and temp.exists() and _media_duration(temp) >= cut + 2.0:
+            break
+    if not temp.exists() or _media_duration(temp) < cut + 2.0:
+        raise RuntimeError("source download failed or source shorter than cut: " + last)
+
     run_cmd([
-        ffmpeg(), "-y", "-v", "error", "-ss", f"{cut:.2f}", "-t", f"{dur:.2f}",
-        "-i", str(temp), "-vf", "scale=-2:720,fps=30,setsar=1",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
-        str(out),
-    ], timeout=900)
+        ffmpeg(), "-y", "-v", "error", "-ss", f"{cut:.2f}", "-t", f"{dur:.2f}", "-i", str(temp),
+        "-vf", "scale=-2:720,fps=30,setsar=1", "-c:v", "libx264", "-preset", "veryfast",
+        "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart", str(out),
+    ], timeout=1000)
+    try: temp.unlink()
+    except Exception: pass
+    if not _usable_download(out, dur):
+        raise RuntimeError(f"source trim too short: requested={dur:.2f}s actual={_media_duration(out):.2f}s")
     return out
 
 
@@ -1933,8 +1949,8 @@ def build_short_shots(topic: str, research: dict[str, Any], project: Project) ->
     total = sum(s.dur for s in shots)
     if not (45 <= total <= 59):
         raise RuntimeError(f"Short duration {total:.2f}s outside 45-59s after automatic edit.")
-    if len(seen_files) < 3:
-        raise RuntimeError("Short requires at least three distinct source segments.")
+    if len(seen_files) < 2:
+        raise RuntimeError("Short requires at least two distinct audiovisual segments.")
     return shots
 
 

@@ -1,0 +1,130 @@
+{
+ "character": "ninja",
+ "source": "ninja-rig-source.png",
+ "width": 768,
+ "height": 1376,
+ "parts": [
+  {
+   "name": "legL",
+   "file": "legL.png",
+   "x": 165,
+   "y": 900,
+   "w": 228,
+   "h": 433,
+   "pivot": [
+    290,
+    930
+   ],
+   "z": 0
+  },
+  {
+   "name": "legR",
+   "file": "legR.png",
+   "x": 392,
+   "y": 900,
+   "w": 230,
+   "h": 433,
+   "pivot": [
+    490,
+    930
+   ],
+   "z": 1
+  },
+  {
+   "name": "armL",
+   "file": "armL.png",
+   "x": 26,
+   "y": 500,
+   "w": 180,
+   "h": 287,
+   "pivot": [
+    178,
+    510
+   ],
+   "z": 2
+  },
+  {
+   "name": "armR",
+   "file": "armR.png",
+   "x": 562,
+   "y": 500,
+   "w": 181,
+   "h": 301,
+   "pivot": [
+    589,
+    510
+   ],
+   "z": 3
+  },
+  {
+   "name": "torso",
+   "file": "torso.png",
+   "x": 120,
+   "y": 312,
+   "w": 546,
+   "h": 786,
+   "pivot": [
+    384,
+    930
+   ],
+   "z": 4
+  },
+  {
+   "name": "head",
+   "file": "head.png",
+   "x": 270,
+   "y": 42,
+   "w": 231,
+   "h": 277,
+   "pivot": [
+    383,
+    300
+   ],
+   "z": 5
+  }
+ ],
+ "face": {
+  "cyber": [
+   350,
+   203,
+   15
+  ],
+  "eye": [
+   413,
+   203,
+   22,
+   12
+  ],
+  "mouth": [
+   382,
+   268,
+   40,
+   18
+  ],
+  "chin": 300,
+  "center": 383,
+  "brow": [
+   413,
+   188
+  ],
+  "skin": [
+   151,
+   108,
+   93
+  ],
+  "mouth_skin": [
+   151,
+   121,
+   100
+  ]
+ },
+ "order": [
+  "legL",
+  "legR",
+  "armL",
+  "armR",
+  "torso",
+  "head"
+ ],
+ "note": "Arms and legs render behind the torso; head in front. Pivots are source-pixel coordinates."
+}

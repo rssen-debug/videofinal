@@ -1,0 +1,21 @@
+{
+  "name": "mobile-clean-v3",
+  "reference_resolution": [
+    720,
+    1280
+  ],
+  "font": "DejaVuSans-Bold.ttf",
+  "font_size": 52,
+  "extra_fill_stroke_px": 1,
+  "outline_color": "black",
+  "outline_px": 5,
+  "max_text_width_px": 550,
+  "center_x": 330,
+  "top_y": 948,
+  "line_step_px": 61,
+  "max_lines": 2,
+  "narrator_color": "white",
+  "source_color": "white",
+  "note": "Fixed caption position and color. Source credits in description; disclose synthetic footage through spoken narration and matching captions before showing it.",
+  "overlays": "Captions only; no extra text or badges"
+}

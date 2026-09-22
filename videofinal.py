@@ -2018,6 +2018,7 @@ def run_short(topic: str, niche: str, resolution: str) -> dict[str, Any]:
         music = synth_music(total, seed=17)
         sfx = synth_sfx(total, [s.start for s in shots if s.kind == "source"])
         video_only = assemble_shots(shots, project, "short", resolution)
+        project.stage("audio")
         audio = build_audio_mix(shots, total, music, sfx, project)
         out = OUTPUTS / f"{slugify(topic)}_{resolution}_short.mp4"
         make_final(video_only, audio, out)
@@ -2184,6 +2185,7 @@ def run_doc(topic: str, niche: str, resolution: str, duration_text: str = "3m30s
         music = synth_music(total, seed=29)
         sfx = synth_sfx(total, [s.start for s in shots if s.kind == "source"])
         video_only = assemble_shots(shots, project, "doc", resolution)
+        project.stage("audio")
         audio = build_audio_mix(shots, total, music, sfx, project)
         out = OUTPUTS / f"{slugify(topic)}_{resolution}_documentary.mp4"
         make_final(video_only, audio, out)
@@ -2370,6 +2372,37 @@ def run_idea_lab(niche: str, mode: str) -> None:
     print("Saved:", out.resolve())
 
 
+def test_video_60s() -> None:
+    reset_progress("60S TEST")
+    OUTPUTS.mkdir(parents=True, exist_ok=True)
+    work=ROOT/".test60"
+    work.mkdir(exist_ok=True)
+    src=work/"source.mp4"
+    run_cmd([ffmpeg(),"-y","-v","error","-f","lavfi","-i","testsrc2=size=640x360:rate=30",
+             "-f","lavfi","-i","sine=frequency=220:sample_rate=44100","-t","60",
+             "-c:v","libx264","-preset","ultrafast","-crf","28","-pix_fmt","yuv420p",
+             "-c:a","aac","-b:a","96k","-shortest",str(src)],timeout=180)
+    doc=OUTPUTS/"TEST_60S_DOCUMENTARY_16x9.mp4"
+    run_cmd([ffmpeg(),"-y","-v","error","-i",str(src),
+             "-vf","scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2,fps=30,setsar=1",
+             "-c:v","libx264","-preset","ultrafast","-crf","28","-pix_fmt","yuv420p",
+             "-c:a","aac","-b:a","96k","-t","60",str(doc)],timeout=180)
+    progress(55,"TEST DOCUMENTARY 16:9")
+    short=OUTPUTS/"TEST_60S_SHORT_9x16.mp4"
+    run_cmd([ffmpeg(),"-y","-v","error","-i",str(src),
+             "-vf","scale=360:640:force_original_aspect_ratio=increase,crop=360:640,fps=30,setsar=1",
+             "-c:v","libx264","-preset","ultrafast","-crf","28","-pix_fmt","yuv420p",
+             "-c:a","aac","-b:a","96k","-t","60",str(short)],timeout=180)
+    progress(100,"60S TEST COMPLETE")
+    qd=probe_video(doc); qs=probe_video(short)
+    assert abs(qd["duration"]-60.0)<0.25 and abs(qs["duration"]-60.0)<0.25
+    assert (qd["video"]["width"],qd["video"]["height"])==(640,360)
+    assert (qs["video"]["width"],qs["video"]["height"])==(360,640)
+    print("\\nTEST MP4s:")
+    print("  ",doc.resolve())
+    print("  ",short.resolve())
+    print("  PASS: 60.00s, documentary 16:9 + short 9:16")
+
 # =============================================================================
 # SELF TEST
 # =============================================================================
@@ -2457,7 +2490,8 @@ def interactive() -> None:
         print("3) IDEA LAB")
         print("4) TEST LLM")
         print("5) SELFTEST")
-        print("6) CAPABILITIES")
+        print("6) TEST 60S VIDEO")
+        print("7) CAPABILITIES")
         print("Q) EXIT")
         choice = ask("\nChoose: ", "1").lower()
         if choice == "q":
@@ -2472,6 +2506,12 @@ def interactive() -> None:
             selftest()
             continue
         if choice == "6":
+            try:
+                test_video_60s()
+            except Exception as exc:
+                print("TEST 60S FAILED:",exc)
+            continue
+        if choice == "7":
             print(json.dumps(capabilities(), ensure_ascii=False, indent=2))
             continue
         if choice not in {"1", "2", "3"}:

@@ -622,7 +622,23 @@ def short_shots(topic,research,root,res):
 
 def doc_shots(topic,research,root,res,duration_target):
     sources,moments=source_moment_pipeline(topic,research,root,'doc',12)
-    if len(moments)<4:raise RuntimeError('Documentary source hunt could not obtain enough original spoken moments.')
+    if not sources:raise RuntimeError('Documentary source hunter found no audiovisual sources.')
+    # Documentary fallback: when original dialogue is scarce, build evidence-card/B-roll beats
+    # from real source footage and research instead of fabricating speaker quotes.
+    if len(moments)<4:
+        for si,src in enumerate(sources[:6]):
+            dur=float(src.get('duration') or 60)
+            for pct in (0.12,0.42,0.72):
+                cut=min(max(0.0,dur*pct-3.0),max(0.0,dur-7.0))
+                moments.append({
+                    'source_index':si,'source_url':src['url'],
+                    'source_title':src.get('title',''),'uploader':src.get('uploader',''),
+                    'quote':'','cut':cut,'dur':min(7.0,max(5.0,dur-cut)),
+                    'subtitle_cues':[],
+                })
+                if len(moments)>=8:break
+            if len(moments)>=8:break
+    if len(moments)<4:raise RuntimeError('Documentary source hunter could not obtain enough source moments.')
     script=build_script_doc(topic,research,moments,duration_target);shots=[];groups=[]
     # Title card, then 5-act blocks.
     shots.append(Shot('card',1.8,None,0.0,topic[:42],None,0.0))
@@ -708,6 +724,9 @@ def autopilot(mode,niche,res,topic=None,retries=5,duration='3m30s'):
         for n in names:rows+=niche_candidates(n,mode,8)
         rows.sort(key=lambda x:x['score'],reverse=True);rows=rows[:retries]
     if not rows:raise RuntimeError('Agenten hittade inga story-kandidater.')
+    print('\n[IDEA LAB] top candidates:')
+    for i,r in enumerate(rows[:5],1):
+        print(f"  {i}) {r.get('score_10',r.get('score',0)/10):.1f}/10 ({r.get('score',0):.1f}%) — {r.get('title','')[:110]}")
     failures=[];target=210
     m=re.search(r'(\d+)m',duration);target=int(m.group(1))*60 if m else 210
     s=re.search(r'(\d+)s',duration);target+=(int(s.group(1)) if s else 0)

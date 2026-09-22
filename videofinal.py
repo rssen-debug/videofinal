@@ -314,12 +314,16 @@ def source_subs(url:str, tag:str):
     return []
 
 def source_info(url:str):
-    for client in ('android','web'):
+    for client in ('android','web','web_embedded','tv'):
         p=run([sys.executable,'-m','yt_dlp','--dump-single-json','--skip-download','--extractor-args',f'youtube:player_client={client}',url],timeout=180,check=False)
         if p.returncode:continue
-        try:o=json.loads(p.stdout);return {'duration':float(o.get('duration') or 0),'title':o.get('title',''),'uploader':o.get('uploader') or o.get('channel',''),'id':o.get('id','')} 
-        except Exception:continue
-    return {'duration':0}
+        try:
+            o=json.loads(p.stdout)
+            return {'duration':float(o.get('duration') or 60),'title':o.get('title',''),'uploader':o.get('uploader') or o.get('channel',''),'id':o.get('id',''),'client':client}
+        except Exception:
+            continue
+    # A short probe can still be attempted even when metadata extraction is imperfect.
+    return {'duration':60.0}
 
 def vtt_moments(cues,wanted=3):
     windows=[]

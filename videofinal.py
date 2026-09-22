@@ -86,7 +86,7 @@ def has_module(name: str) -> bool:
 def ensure_dependencies() -> None:
     packages = {
         'requests':'requests>=2.31',
-        'yt_dlp':'yt-dlp>=2026.1.1',
+        'yt_dlp':'yt-dlp>=2024.08.0',
         'edge_tts':'edge-tts>=6.1.9',
         'faster_whisper':'faster-whisper>=1.0',
     }

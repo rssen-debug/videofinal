@@ -101,9 +101,11 @@ _ASR_MODEL = None
 # =============================================================================
 
 def banner() -> None:
+    st=llm_status()
     print("\n" + "=" * 72)
     print("VIDEOFINAL 2026  |  AUTOPILOT CREATOR STUDIO")
-    print("LLM:", llm_status()["provider"], "/", llm_status()["model"] or "none")
+    print("LLM:",st["provider"],"/",st["model"] or "none")
+    print("VAULT:",OUTPUTS)
     print("=" * 72)
 
 
@@ -136,6 +138,28 @@ def ffmpeg() -> str:
 def ffprobe() -> str:
     return exe("ffprobe")
 
+
+_PROGRESS = {"started": time.time(), "pct": 0.0}
+_STAGE_PCT = {"bootstrap":2,"research":12,"story":20,"source_hunt":34,"source_selection":40,"render":72,"audio":84,"qc":96,"done":100}
+
+def _fmt_eta(seconds: float) -> str:
+    sec=max(0,int(seconds))
+    return f"{sec//3600:02}:{(sec%3600)//60:02}:{sec%60:02}"
+
+def progress(pct: float, label: str) -> None:
+    pct=max(0.0,min(100.0,float(pct)))
+    elapsed=max(0.001,time.time()-_PROGRESS["started"])
+    eta=elapsed*(100.0-pct)/max(pct,0.5)
+    width=34
+    done=int(width*pct/100.0)
+    bar="#"*done+"-"*(width-done)
+    print(f"\r[{bar}] {pct:6.1f}% | ETA {_fmt_eta(eta)} | {label[:44]:<44}",end="",flush=True)
+    if pct>=100.0: print()
+
+def reset_progress(label: str="AUTOPILOT") -> None:
+    _PROGRESS["started"]=time.time()
+    _PROGRESS["pct"]=0.0
+    progress(0.0,label)
 
 def has_module(name: str) -> bool:
     try:
@@ -620,9 +644,10 @@ class Project:
         )
 
     def stage(self, name: str) -> None:
-        self.state["stage"] = name
-        self.state.setdefault("stages", []).append({"name": name, "at": time.time()})
+        self.state["stage"]=name
+        self.state.setdefault("stages",[]).append({"name":name,"at":time.time()})
         self.save()
+        progress(_STAGE_PCT.get(name,_PROGRESS.get("pct",0.0)),name.upper().replace("_"," "))
 
     def note(self, msg: str, **data: Any) -> None:
         self.state.setdefault("events", []).append({"at": time.time(), "message": msg, **data})
@@ -2277,7 +2302,8 @@ def parse_duration_seconds(text: str) -> int:
 
 
 def autopilot(mode: str, niche: str, resolution: str, topic: Optional[str] = None,
-              max_story_retries: int = 5, duration_text: str = "3m30s") -> dict[str, Any]:
+              max_story_retries: int = 8, duration_text: str = "3m30s") -> dict[str, Any]:
+    reset_progress(f"AUTOPILOT {mode.upper()} | {niche.upper()} | LLM {llm_provider().upper()}")
     if topic:
         candidates = [{"title": topic, "score": 100.0, "score_10": 10.0}]
     else:
@@ -2514,7 +2540,7 @@ def main() -> None:
     state = autopilot(
         args.mode, args.niche, args.resolution,
         topic=args.topic or None,
-        max_story_retries=5,
+        max_story_retries=8,
         duration_text=args.duration,
     )
     print(json.dumps(state, ensure_ascii=False, indent=2))

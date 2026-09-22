@@ -1857,23 +1857,28 @@ def build_short_shots(topic: str, research: dict[str, Any], project: Project) ->
 
     # Map moment indices to actual downloaded files.
     selected_sources = []
-    for idx, m in enumerate(moments[:8]):
-        src = sources[m["source_index"]]
-        key = hashlib.sha1((src["url"] + f'|{m["cut"]:.2f}|{m["dur"]:.2f}').encode()).hexdigest()[:12]
-        path = ASSET_CLIPS / f"{slugify(topic)}_{idx:02d}_{key}.mp4"
-        if not path.exists():
-            download_source_segment(src["url"], float(m["cut"]), float(m["dur"]), path)
-        m["file"] = str(path)
-        # Final source captions are based on the actual trimmed audio whenever Whisper is available.
-        if has_module("faster_whisper"):
-            local_words = whisper_words(path)
-            if local_words:
-                m["asr_words"] = [
-                    {"text": w["text"], "start": float(w["start"]) + float(m["cut"]),
-                     "end": float(w["end"]) + float(m["cut"])}
-                    for w in local_words
-                ]
-        selected_sources.append(m)
+    for idx, m in enumerate(moments[:10]):
+        try:
+            src = sources[m["source_index"]]
+            key = hashlib.sha1((src["url"] + f'|{m["cut"]:.2f}|{m["dur"]:.2f}').encode()).hexdigest()[:12]
+            path = ASSET_CLIPS / f"{slugify(topic)}_{idx:02d}_{key}.mp4"
+            if not path.exists():
+                download_source_segment(src["url"], float(m["cut"]), float(m["dur"]), path)
+            if not _usable_download(path, float(m["dur"])):
+                raise RuntimeError(f"downloaded clip too short ({_media_duration(path):.2f}s)")
+            m["file"] = str(path)
+            if has_module("faster_whisper"):
+                local_words = whisper_words(path)
+                if local_words:
+                    m["asr_words"] = [
+                        {"text": w["text"], "start": float(w["start"]) + float(m["cut"]),
+                         "end": float(w["end"]) + float(m["cut"])}
+                        for w in local_words
+                    ]
+            selected_sources.append(m)
+        except Exception as exc:
+            project.note("short_clip_skipped", error=str(exc)[:400], source=m.get("source_url",""), cut=m.get("cut",0))
+            continue
 
     # Compose the script order. We prefer three distinct source moments and 4-5 narration blocks.
     source_queue = selected_sources[:]
@@ -1964,7 +1969,6 @@ def build_short_shots(topic: str, research: dict[str, Any], project: Project) ->
 
     total = sum(s.dur for s in shots)
     if total < 45:
-        # Extend with unique source moments, not still frames.
         for m in selected_sources:
             if total >= 45:
                 break
@@ -1972,10 +1976,26 @@ def build_short_shots(topic: str, research: dict[str, Any], project: Project) ->
                 add_source(m, 6.5)
                 total = sum(s.dur for s in shots)
     total = sum(s.dur for s in shots)
+    if total > 58.5:
+        overflow = total - 58.5
+        while overflow > 0 and shots:
+            last = shots[-1]
+            if last.dur <= overflow + 0.05:
+                overflow -= last.dur
+                shots.pop()
+            else:
+                last.dur -= overflow
+                overflow = 0
+        total = sum(s.dur for s in shots)
+        project.note("short_auto_trimmed", final_duration=total)
+        project.state["caption_groups"] = [
+            g for g in project.state.get("caption_groups", [])
+            if float(g.get("start",0)) < total
+        ]
     if not (45 <= total <= 59):
-        raise RuntimeError(f"Short duration {total:.2f}s outside 45-59s after automatic edit.")
+        raise RuntimeError(f"Short automatic timeline could not fit 45-59s; got {total:.2f}s.")
     if len(seen_files) < 2:
-        raise RuntimeError("Short requires at least two distinct audiovisual segments.")
+        raise RuntimeError("Short requires at least two audiovisual segments.")
     return shots
 
 
@@ -2037,113 +2057,110 @@ def make_doc_shots(topic: str, research: dict[str, Any], project: Project, durat
     sources = choose_sources(topic, research, count=7)
     if not sources:
         raise RuntimeError("Documentary source hunter found no usable candidates.")
-    moments: list[dict[str, Any]] = []
-    for s in sources:
+
+    moments=[]
+    for srow in sources:
         try:
-            cues = fetch_source_subtitles(s["url"], CACHE / "subs")
-            for m in choose_dialogue_segments(s, cues, "doc", wanted=2):
-                m["source_url"] = s["url"]
-                m["source_title"] = s.get("title", "")
-                m["uploader"] = s.get("uploader", "")
-                m["subtitle_cues"] = cues
-                moments.append(m)
+            cues=fetch_source_subtitles(srow["url"], CACHE/"subs")
+            got=choose_dialogue_segments(srow,cues,"doc",wanted=2)
+            if got:
+                for m in got:
+                    m["source_url"]=srow["url"]; m["source_title"]=srow.get("title","")
+                    m["uploader"]=srow.get("uploader",""); m["subtitle_cues"]=cues
+                    moments.append(m)
+            else:
+                got=automatic_probe_moments(srow,project,wanted=2)
+                for m in got:
+                    moments.append(m)
         except Exception as exc:
-            project.note("doc_source_probe_failed", url=s["url"], error=str(exc)[:500])
+            project.note("doc_source_probe_failed",url=srow.get("url",""),error=str(exc)[:400])
+        if len(moments)>=12: break
 
-    if len(moments) < 4:
-        for i, s in enumerate(sources[:5]):
-            meta_dur = float(s.get("duration") or 60)
-            cut = min(max(2.0 + i * 8, 0), max(0, meta_dur - 8))
-            moments.append({
-                "source_url": s["url"], "source_title": s.get("title", ""),
-                "uploader": s.get("uploader", ""), "quote": "",
-                "cut": cut, "dur": 7.0, "subtitle_cues": [],
-            })
-    moments = moments[:12]
-    script = build_doc_script(topic, research, moments, duration)
-    project.state["script"] = script
-    project.state["sources"] = sources
+    if len(moments)<4:
+        for i,srow in enumerate(sources):
+            dur=float(srow.get("duration") or 0)
+            if dur<5: continue
+            cut=min(max(1.0+i*7,0),max(0,dur-7))
+            moments.append({"source_url":srow["url"],"source_title":srow.get("title",""),
+                            "uploader":srow.get("uploader",""),"quote":"","cut":cut,"dur":min(7.0,dur-cut),
+                            "subtitle_cues":[]})
+            if len(moments)>=8: break
+    if not moments:
+        raise RuntimeError("Documentary source hunter found no usable moments.")
 
-    files = []
-    for i, m in enumerate(moments):
-        key = hashlib.sha1((m["source_url"] + f'|{m["cut"]:.2f}|{m["dur"]:.2f}').encode()).hexdigest()[:12]
-        path = ASSET_CLIPS / f"{slugify(topic)}_doc_{i:02d}_{key}.mp4"
-        if not path.exists():
-            download_source_segment(m["source_url"], float(m["cut"]), float(m["dur"]), path)
-        m["file"] = str(path)
-        if has_module("faster_whisper") and not m.get("subtitle_cues"):
-            local_words = whisper_words(path)
-            m["asr_words"] = [
-                {"text": w["text"], "start": float(w["start"]) + float(m["cut"]),
-                 "end": float(w["end"]) + float(m["cut"])}
-                for w in local_words
-            ]
-        files.append(m)
+    script=build_doc_script(topic,research,moments[:12],duration)
+    project.state["script"]=script
+    valid=[]
+    for i,m in enumerate(moments[:12]):
+        try:
+            key=hashlib.sha1((m["source_url"]+f'|{m["cut"]:.2f}|{m["dur"]:.2f}').encode()).hexdigest()[:12]
+            path=ASSET_CLIPS/f"{slugify(topic)}_doc_{i:02d}_{key}.mp4"
+            if not path.exists():
+                download_source_segment(m["source_url"],float(m["cut"]),float(m["dur"]),path)
+            if not _usable_download(path,float(m["dur"])):
+                raise RuntimeError(f"clip too short: {_media_duration(path):.2f}s")
+            m["file"]=str(path)
+            if has_module("faster_whisper") and not m.get("subtitle_cues"):
+                words=whisper_words(path)
+                m["asr_words"]=[{"text":w["text"],"start":float(w["start"])+float(m["cut"]),
+                                 "end":float(w["end"])+float(m["cut"])} for w in words]
+            m["_original_index"]=i
+            valid.append(m)
+        except Exception as exc:
+            project.note("doc_clip_skipped",index=i,error=str(exc)[:400])
+            continue
 
-    shots: list[Shot] = [
-        Shot(kind="card", start=0.0, dur=2.2, card_text=topic[:32], card_sub="ORIGINAL DOCUMENTARY", note="title"),
-    ]
-    narr_idx = 0
-    for block in script.get("blocks", []):
-        kind = str(block.get("kind", "narration"))
-        start = sum(s.dur for s in shots)
-        if kind == "source":
-            idx = int(block.get("moment_index", 0))
-            idx = max(0, min(idx, len(files) - 1))
-            m = files[idx]
-            dur = min(float(m.get("dur", 7.0)), 8.0)
-            groups = proportional_words(m.get("subtitle_cues", []))
-            if m.get("asr_words"):
-                groups = m["asr_words"]
-            gabs = [
-                {"start": start + max(0, g["start"] - m["cut"]),
-                 "end": start + max(0, g["end"] - m["cut"]),
-                 "text": g["text"]}
-                for g in caption_groups(groups)
-                if g["end"] >= m["cut"] and g["start"] <= m["cut"] + dur
-            ]
-            project.state.setdefault("caption_groups", []).extend(gabs)
-            shots.append(Shot(kind="source", start=start, dur=dur, clip=Path(m["file"]), note="source"))
+    if not valid:
+        raise RuntimeError("No documentary clip survived automatic acquisition.")
+
+    index_map={m["_original_index"]:i for i,m in enumerate(valid)}
+    shots=[Shot(kind="card",start=0.0,dur=2.2,card_text=topic[:38],card_sub="ORIGINAL DOCUMENTARY",note="title")]
+    cap_state=project.state.setdefault("caption_groups",[])
+    narr_idx=0
+
+    for block in script.get("blocks",[]):
+        kind=str(block.get("kind","narration"))
+        start=sum(x.dur for x in shots)
+        if kind=="source":
+            orig=int(block.get("moment_index",0) or 0)
+            idx=index_map.get(orig,0)
+            idx=max(0,min(idx,len(valid)-1))
+            m=valid[idx]
+            dur=min(8.0,float(m.get("dur",7.0)))
+            words=m.get("asr_words") or proportional_words(m.get("subtitle_cues",[]))
+            for g in caption_groups(words):
+                local_start=max(0,float(g["start"])-float(m["cut"]))
+                local_end=max(local_start,float(g["end"])-float(m["cut"]))
+                if local_start<=dur+0.2:
+                    cap_state.append({"start":start+local_start,"end":min(start+dur,start+local_end),"text":g["text"]})
+            shots.append(Shot(kind="source",start=start,dur=dur,clip=Path(m["file"]),
+                               clip_cut=0.0,source_words=words,note="original source dialogue"))
         else:
-            text = norm_text(str(block.get("text", "")))
-            if not text:
-                continue
-            tpath = project.root / f"narration_{narr_idx:02d}.mp3"
-            narr_idx += 1
-            tts(text, DEFAULT_VOICE, tpath)
-            dur = audio_duration(tpath)
-            project.state.setdefault("caption_groups", []).extend(block_caption_groups(text, start, dur))
-            broll = files[(narr_idx - 1) % len(files)] if files else None
-            shots.append(
-                Shot(
-                    kind="narration",
-                    start=start,
-                    dur=dur,
-                    clip=Path(broll["file"]) if broll else None,
-                    narration=text,
-                    note="narrator",
-                )
-            )
+            txt=norm_text(str(block.get("text","")))
+            if not txt: continue
+            idx=index_map.get(int(block.get("moment_index",0) or 0),0)
+            idx=max(0,min(idx,len(valid)-1))
+            tpath=project.root/f"narration_{narr_idx:02d}.mp3"; narr_idx+=1
+            tts(txt,DEFAULT_VOICE,tpath); dur=audio_duration(tpath)
+            cap_state.extend(block_caption_groups(txt,start,dur))
+            shots.append(Shot(kind="narration",start=start,dur=dur,clip=Path(valid[idx]["file"]),
+                              clip_cut=0.0,narration=txt,note="narrator over real footage"))
 
-    # If LLM script under-runs, append additional unique evidence beats.
-    i = 0
-    while sum(s.dur for s in shots) < max(120, duration * 0.72) and i < len(files):
-        m = files[i]
-        start = sum(s.dur for s in shots)
-        groups = proportional_words(m.get("subtitle_cues", []))
-        project.state.setdefault("caption_groups", []).extend(
-            [
-                {"start": start + max(0, g["start"] - m["cut"]),
-                 "end": start + max(0, g["end"] - m["cut"]),
-                 "text": g["text"]}
-                for g in caption_groups(groups)
-            ]
-        )
-        shots.append(Shot(kind="source", start=start, dur=min(7.0, float(m["dur"])), clip=Path(m["file"])))
-        i += 1
+    target_fill=max(120,duration*0.72)
+    i=0
+    while sum(x.dur for x in shots)<target_fill and i<len(valid):
+        m=valid[i]; start=sum(x.dur for x in shots)
+        dur=min(7.0,float(m.get("dur",7.0)))
+        words=m.get("asr_words") or proportional_words(m.get("subtitle_cues",[]))
+        for g in caption_groups(words):
+            ls=max(0,float(g["start"])-float(m["cut"])); le=max(ls,float(g["end"])-float(m["cut"]))
+            if ls<=dur+0.2: cap_state.append({"start":start+ls,"end":min(start+dur,start+le),"text":g["text"]})
+        shots.append(Shot(kind="source",start=start,dur=dur,clip=Path(m["file"]),
+                          clip_cut=0.0,source_words=words,note="evidence b-roll"))
+        i+=1
 
-    total = sum(s.dur for s in shots)
-    if total < 45:
+    total=sum(x.dur for x in shots)
+    if total<45:
         raise RuntimeError("Documentary plan produced no usable runtime.")
     return shots
 
